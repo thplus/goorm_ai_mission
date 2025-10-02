@@ -246,6 +246,139 @@ index = faiss.read_index(INDEX_PATH)
 meta = pd.read_parquet(META_PATH)
 chunks_df = pd.read_parquet(CHUNKS_PATH)
 ```
+
+### 질문 임베딩
+
+```python
+def embed_query(q: str) -> np.ndarray:
+    try:
+        v = st.encode([q], normalize_embeddings=True, prompt_name="query")[0]
+    except TypeError:
+        v = st.encode([f"query: {q}"], normalize_embeddings=True)[0]
+    return v.astype("float32")
+```
+
+질문 임베딩 또한 `dragonkue/snowflake-arctic-embed-l-v2.0-ko`을 활용하여 임베딩을 한 뒤 유사도를 검색했다.
+
+### 검색
+
+```python
+def search(q: str, topk=5):
+    qv = embed_query(q)
+    D, I = index.search(qv[None, :], topk)
+    rows = []
+    for s, idx in zip(D[0], I[0]):
+        m = meta.iloc[int(idx)]
+        rows.append({
+            "row_id": int(idx),
+            "score": float(s),
+            "title": m["title"],
+            "doc_id": m["doc_id"],
+            "chunk_id": int(m["chunk_id"])
+        })
+    return rows
+```
+
+### 컨텍스트 구성
+
+컨텍스트 블록은 언어 모델이 참고할 내용으로 검색에서 가져 온 내용을 활용해서 구성했다.
+
+```python
+def get_chunk_text(doc_id, chunk_id, prefer="context"):
+    row = chunks_df[(self.chunks_df["doc_id"]==doc_id) & (self.chunks_df["chunk_id"]==int(chunk_id))]
+    if row.empty:
+        return ""
+    for col in [prefer, "norm_text", "context", "text"]:
+        if col in row.columns:
+            val = row.iloc[0][col]
+            if val is not None:
+                return str(val)
+    return ""
+```
+
+```python
+def build_context_blocks(hits, k_ctx=5, min_score=0.0, max_chars=500):
+    blocks, sources, used_chunk = [], [], []
+    if not hits:
+        return blocks, sources, used_chunk, 0.0
+
+    for h in hits[:k_ctx]:
+        if h.get("score", 1.0) < min_score:
+            continue
+        chunk = get_chunk_text(h["doc_id"], h["chunk_id"], prefer="context")
+        snippet = (chunk or "").replace("\n", " ").strip()[:max_chars]
+        blocks.append(snippet)
+        sources.append(f'{h.get("row_id",0)}: {h.get("title","")}#{h.get("chunk_id",0)}')
+        used_chunk.append(chunk or "")
+
+    seen, uniq = set(), []
+    for s in sources:
+        if s not in seen:
+            seen.add(s); uniq.append(s)
+    
+    return blocks, uniq, used_chunk, top1_score
+```
+
+`blocks`는 실제 모델이 참고할 내용이다.<br/>
+`sources`는 출처 중복 제거 및 순서보존, 모델의 메타 데이터를 보기 위해 로그용으로 남겨놨다.<br/>
+`used_chunks`는 모델이 참고한 내용을 추후에 확인할 수 있도록 남겨놨다.<br/>
+`top_score`는 추후 질의 범위 제한 메커니즘을 구현하기 위해 사용한다.
+
+### 언어 모델 선택
+
+```python
+GEN_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
+tok = AutoTokenizer.from_pretrained(GEN_MODEL, use_fast=True)
+model = AutoModelForCausalLM.from_pretrained(
+    GEN_MODEL,
+    dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
+    device_map="auto",
+)
+```
+
+모델의 크기가 작으면서 한국어의 이해도가 높은 것으로 나타나는 Qwen3의 4B를 선택했다. [참고](https://huggingface.co/Qwen/Qwen3-4B-Instruct-2507)
+
+### 프롬프트 구성
+
+```python
+SYSTEM = (
+    "당신은 한국어 RAG 어시스턴트입니다. 제공된 근거(context)만 사용해 사실적으로 답하세요. "
+    "근거에 없으면 '제공된 문서에 정보가 없습니다.'라고 한 줄로만 답하세요."
+)
+```
+
+```python
+def build_prompt(question, ctx_blocks):
+    user = (
+        "[문서들]\n" + "\n".join(f"- {b}" for b in ctx_blocks) + "\n\n"
+        "[질문]\n" + question + "\n\n"
+        "[출력 지침]\n- 한 줄로만 답하세요. 추가 설명/머리말/코드블록 금지."
+    )
+    return tok.apply_chat_template(
+        [{"role":"system","content":SYSTEM},
+         {"role":"user","content":user}],
+        tokenize=False, add_generation_prompt=True
+    )
+```
+
+프롬프트는 위와 같이 구성했다.
+
+### 답변 구성
+
+```python
+def generate_answer(self, question, ctx_blocks, temperature=0.2, max_new_tokens=128):
+    prompt = build_prompt(question, ctx_blocks)
+    inputs = tok(prompt, return_tensors="pt").to(self.model.device)
+    with torch.no_grad():
+        out = model.generate(
+            **inputs, do_sample=True, temperature=temperature, top_p=0.9,
+            max_new_tokens=max_new_tokens, eos_token_id=self.tok.eos_token_id,
+        )
+    gen_ids = out[0][inputs["input_ids"].shape[-1]:]
+    text = tok.decode(gen_ids, skip_special_tokens=True).strip()
+    return text.splitlines()[0].strip() if text else "제공된 문서에 정보가 없습니다."
+```
+
 ### 질의 범위 제한 메커니즘
 
 컨텍스트 개수와 cut off가 되는 cosine 유사도는 아래와 같이 정했다. 가져올 컨텍스트 개수를 7, 5, 3 개로 설정하여 `squad_kor_v1` 내의 validation set 300개를 추출해 지표를 살펴보았다.
@@ -304,143 +437,31 @@ chunks_df = pd.read_parquet(CHUNKS_PATH)
 <br/>
 cutoff가 0.36 미만일 경우 `"제공된 문서에 정보가 없습니다."`로 답변한다. [참고](#답변-구성)
 
-### 질문 임베딩
+### 최종 모델 사용
 
 ```python
-def embed_query(q: str) -> np.ndarray:
-    try:
-        v = st.encode([q], normalize_embeddings=True, prompt_name="query")[0]
-    except TypeError:
-        v = st.encode([f"query: {q}"], normalize_embeddings=True)[0]
-    return v.astype("float32")
+def ask(question):
+    topk, cutoff, k_ctx, min_score = 5, 0.36, 5, 0.0
+
+    hits = search(question, topk = topk)
+    ctx_blocks, sources, used_chunks, top1 = build_context(hits, k_ctx=k_ctx, min_score=min_score)
+
+    if (not hits) or (top1 < cutoff) or (not ctx_blocks):
+        return {
+            "retrieved_document_id": 0,
+            "retrieved_document": "",
+            "question": question,
+            "answers": "제공된 문서에 정보가 없습니다."
+        }
+
+    answer = generator.generate_answer(question, ctx_blocks)
+
+    return {
+        "retrieved_document_id": sources[0].split(":")[0],
+        "retrieved_document": used_chunks[0],
+        "question": question,
+        "answers": answer
+    }
 ```
 
-질문 임베딩 또한 `dragonkue/snowflake-arctic-embed-l-v2.0-ko`을 활용하여 임베딩을 한 뒤 유사도를 검색했다.
-
-### 검색
-
-```python
-def search(q: str, topk=5):
-    qv = embed_query(q)
-    D, I = index.search(qv[None, :], topk)
-    rows = []
-    for s, idx in zip(D[0], I[0]):
-        m = meta.iloc[int(idx)]
-        rows.append({
-            "row_id": int(idx),
-            "score": float(s),
-            "title": m["title"],
-            "doc_id": m["doc_id"],
-            "chunk_id": int(m["chunk_id"]),
-            "preview": m["context_preview"][:200]
-        })
-    return {"hits": rows}
-```
-
-### 컨텍스트 구성
-
-컨텍스트 블록은 언어 모델이 참고할 내용으로 검색에서 가져 온 내용을 활용해서 구성했다.
-
-```python
-def get_chunk_text(doc_id, chunk_id, prefer="context"):
-    row = chunks_df[(chunks_df["doc_id"]==doc_id) & (chunks_df["chunk_id"]==chunk_id)]
-    if row.empty: return ""
-    for col in [prefer, "norm_text", "context", "text"]:
-        if col in row.columns: return str(row.iloc[0][col])
-    return ""
-```
-
-```python
-def build_context_blocks(hits, k_ctx=5, min_score=0.0, max_chars=500):
-    blocks, sources, used_chunks = [], [], []
-    if not isinstance(hits, list):
-        return blocks, sources, used_chunks
-
-    for h in hits[:k_ctx]:
-        if h.get("score", 1.0) < min_score:
-            continue
-        row_id = h.get("row_id", 0)
-        title  = h.get("title") or ""
-        cid    = h.get("chunk_id", 0)
-
-        chunk_text = get_chunk_text(h["doc_id"], cid, prefer="context")
-        snippet = (chunk_text or "").replace("\n"," ").strip()[:max_chars]
-
-        blocks.append(snippet)
-        sources.append(f"{row_id}: {title}#{cid}")
-        used_chunks.append(chunk_text or "")
-
-    seen, uniq = set(), []
-    for s in sources:
-        if s not in seen:
-            seen.add(s); uniq.append(s)
-
-    return blocks, uniq, used_chunks
-```
-
-`blocks`는 실제 모델이 참고할 내용이다.<br/>
-`sources`는 출처 중복 제거 및 순서보존, 모델의 메타 데이터를 보기 위해 로그용으로 남겨놨다.<br/>
-`used_chunks`는 모델이 참고한 내용을 추후에 확인할 수 있도록 남겨놨다.<br/>
-
-### 언어 모델 선택
-
-```python
-GEN_MODEL = "Qwen/Qwen3-4B-Instruct-2507"
-tok = AutoTokenizer.from_pretrained(GEN_MODEL, use_fast=True)
-model = AutoModelForCausalLM.from_pretrained(
-    GEN_MODEL,
-    dtype=torch.float16 if torch.cuda.is_available() else torch.float32,
-    device_map="auto",
-)
-```
-
-모델의 크기가 작으면서 한국어의 이해도가 높은 것으로 나타나는 Qwen3의 4B를 선택했다.
-
-### 프롬프트 구성
-
-```python
-SYSTEM = (
-    "당신은 한국어 RAG 어시스턴트입니다. 제공된 근거(context)만 사용해 사실적으로 답하세요. "
-    "근거에 없으면 '제공된 문서에 정보가 없습니다.'라고 한 줄로만 답하세요."
-)
-```
-
-```python
-def build_prompt(question, ctx_blocks):
-    user = (
-        "[문서들]\n" + "\n".join(f"- {b}" for b in ctx_blocks) + "\n\n"
-        "[질문]\n" + question + "\n\n"
-        "[출력 지침]\n- 한 줄로만 답하세요. 추가 설명/머리말/코드블록 금지."
-    )
-    return tok.apply_chat_template(
-        [{"role":"system","content":SYSTEM},
-         {"role":"user","content":user}],
-        tokenize=False, add_generation_prompt=True
-    )
-```
-
-프롬프트는 위와 같이 구성했다.
-
-### 답변 구성
-
-```python
-def generate_answer(question, hits, cutoff=0.36, k_ctx=5, temperature=0.2, max_new_tokens=128):
-    if not hits or hits[0].get("score", 0.0) < cutoff:
-        return {"answer":"제공된 문서에 정보가 없습니다.", "sources": [], "used_context": [], "used_chunks": []}
-
-    ctx_blocks, sources, used_chunks = build_context_blocks(hits, k_ctx=k_ctx)
-    prompt = build_prompt(question, ctx_blocks)
-
-    inputs = tok(prompt, return_tensors="pt").to(model.device)
-    with torch.no_grad():
-        out = model.generate(
-            **inputs, do_sample=True, temperature=temperature, top_p=0.9,
-            max_new_tokens=max_new_tokens, eos_token_id=tok.eos_token_id,
-        )
-
-    gen_ids = out[0][inputs["input_ids"].shape[-1]:]
-    text = tok.decode(gen_ids, skip_special_tokens=True).strip()
-    answer = text.splitlines()[0].strip() if text else "제공된 문서에 정보가 없습니다."
-
-    return {"answer": answer, "sources": sources, "used_context": ctx_blocks, "used_chunks": used_chunks}
-```
+`hits`로 받은 검색 결과가 없거나 `hits`내의 참고할 `context`가 없거나 앞선 [질의 범위 제한 메커니즘](#질의-범위-제한-메커니즘)에 따라 `cutoff`가 0.36 미만이면 "제공된 문서에 정보가 없습니다."라는 결과를 출력한다.

@@ -15,7 +15,9 @@ class QwenRequest(BaseModel):
     question: str
 
 @app.post("/ask")
-def ask(req: QwenRequest, topk = 5, cutoff=0.36, k_ctx=5, min_score=0.0):
+def ask(req: QwenRequest):
+    topk, cutoff, k_ctx, min_score = 5, 0.36, 5, 0.0
+
     retriver = Retriever(app.state.st, app.state.index, app.state.meta) #st, index, meta
     ctxb = ContextBuilder(app.state.chunks_df) #chunks_df
     generator = Generator(app.state.tok, app.state.model) #tok, model
@@ -36,7 +38,7 @@ def ask(req: QwenRequest, topk = 5, cutoff=0.36, k_ctx=5, min_score=0.0):
     answer = generator.generate_answer(question, ctx_blocks)
 
     return {
-        "retrieved_document_id": sources[0].split(":")[0],
+        "retrieved_document_id": int(sources[0].split(":")[0]),
         "retrieved_document": used_chunks[0],
         "question": question,
         "answers": answer
