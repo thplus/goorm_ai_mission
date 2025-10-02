@@ -164,6 +164,7 @@ import pandas as pd
 
 vecs = np.load(VEC_PATH).astype("float32")
 meta = pd.read_parquet(META_PATH)
+chunks_df = pd.read_parquet(CHUNKS_PATH)
 
 index = faiss.IndexFlatIP(vecs.shape[1])
 index.add(vecs)
