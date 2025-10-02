@@ -16,9 +16,9 @@ Google Colab으로 실행할 경우 [해당 예시](https://colab.research.googl
 
 #### 설치
 
-retrieve에 필요한 벡터DB는 github에 올려 놓았으므로 `gitclone`만으로 가능하다.<br/>
+retrieve에 필요한 벡터DB는 github에 올려 놓았으므로 `git clone`만으로 가능하다.<br/>
 
-1. gitclone
+1. git clone
     ```
     git clone https://github.com/thplus/goorm_ai_mission.git
     ```
@@ -57,6 +57,21 @@ retrieve에 필요한 벡터DB는 github에 올려 놓았으므로 `gitclone`만
     "question": "바그너는 교향곡 작곡을 어디까지 쓴 뒤에 중단했는가?"
     }'
     ```
+
+    FastAPI를 사용하므로 내장 Swagger를 통해 쉽게 테스트할 수 있다.<br/>
+    내장 Swagger는 `/docs` 경로로 접근할 수 있다.
+
+    **/docs 화면**<br/>
+    ![docs1](/asset/images/docs1.png)<br/>
+    해당 화면에서 `Try it out` 클릭
+
+    **Post 요청**<br/>
+    ![docs2](/asset/images/docs2.png)<br/>
+    `Request body`란에 원하는 질문을 넣은 후 `Execute` 클릭
+
+    **Response**<br/>
+    ![docs3](/asset/images/docs3.png)<br/>
+    잠시 기다린 후 `Response body`를 확인
 
 ### API 사용 예시
 
