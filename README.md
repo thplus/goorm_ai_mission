@@ -31,7 +31,7 @@ retrieve에 필요한 벡터DB는 github에 올려 놓았으므로 `gitclone`만
 
 1. gitclone
     ```
-    gitclone https://github.com/thplus/goorm_ai_mission.git
+    git clone https://github.com/thplus/goorm_ai_mission.git
     ```
 
 2. `requirements` 설치
