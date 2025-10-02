@@ -11,19 +11,8 @@
 
 ### 설치 및 실행 방법
 
-질문 임베딩을 위한 Faiss 설치가 필요하다.<br/>
-FAISS를 CPU로 사용할 경우와 GPU로 사용할 경우 두 설치 파일이 다르며, 동시에 설치할 경우, 충돌이 있어 선택적 설치가 필요하다.
-
-#### CPU 사용
-
-```
-pip install faiss-cpu==1.12.0
-```
-
-#### GPU 사용
-```
-pip install faiss-gpu-cu12
-```
+설치 및 실행 방법은 아래와 같다.<br/>
+Google Colab으로 실행할 경우 [해당 예시](https://colab.research.google.com/drive/1_8To3qdZjZ6hJviuvJ6o8XbfAkyqotzY?usp=sharing)를 통해 실행 가능하다. **(단, pyngrok 토큰 필요)**
 
 #### 설치
 
@@ -48,15 +37,15 @@ retrieve에 필요한 벡터DB는 github에 올려 놓았으므로 `gitclone`만
 
 1. fastapi 실행
     ```
-    cd app
+    cd goorm_ai_mission/app
     ```
 
     ```
     uvicorn main:app --host 0.0.0.0 --port 8000 --reload
     ```
 
-2. /ask 요청
-<br/>
+2. /ask 요청 <br/>
+
     `127.0.0.1:8000` 기준 아래와 같다.
     
     ```
